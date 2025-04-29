@@ -3,7 +3,11 @@ package controllers
 import (
 	"backend/config"
 	"backend/models"
+	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -13,6 +17,7 @@ func CreateTask(ctx *gin.Context) {
 
 	if err := ctx.ShouldBindJSON(&input); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 
 	userId, _ := ctx.Get("user_id")
@@ -24,15 +29,34 @@ func CreateTask(ctx *gin.Context) {
 	}
 
 	config.DB.Create(&task)
-	ctx.JSON(http.StatusOK, gin.H{"message": "Task created successfully!"})
+
+	cacheKey := fmt.Sprintf("tasks:user:%d", task.UserID)
+	config.RedisClient.Del(context.Background(), cacheKey)
+
+	ctx.JSON(http.StatusOK, gin.H{"task": task, "source": "db"})
 }
 
 func GetTasks(ctx *gin.Context) {
 	userId, _ := ctx.Get("user_id")
+	uid := fmt.Sprintf("%v", userId)
+
+	cacheKey := "tasks:user:" + uid
 	var tasks []models.Task
 
+	cached, err := config.RedisClient.Get(context.Background(), cacheKey).Result()
+	if err == nil {
+		if err := json.Unmarshal([]byte(cached), &tasks); err == nil {
+			ctx.JSON(http.StatusOK, gin.H{"tasks": tasks, "source": "cache"})
+			return
+		}
+	}
+
 	config.DB.Where("user_id = ?", userId.(uint)).Find(&tasks)
-	ctx.JSON(http.StatusOK, gin.H{"tasks": tasks})
+
+	jsonTasks, _ := json.Marshal(tasks)
+	config.RedisClient.Set(context.Background(), cacheKey, jsonTasks, 10*time.Minute)
+
+	ctx.JSON(http.StatusOK, gin.H{"tasks": tasks, "source": "db"})
 }
 
 func UpdateTask(c *gin.Context) {
@@ -51,6 +75,10 @@ func UpdateTask(c *gin.Context) {
 	}
 
 	config.DB.Model(&task).Updates(models.Task{Title: input.Title, Content: input.Content})
+
+	cacheKey := fmt.Sprintf("tasks:user:%d", task.UserID)
+	config.RedisClient.Del(context.Background(), cacheKey)
+
 	c.JSON(http.StatusOK, gin.H{"message": "Task updated!", "task": task})
 }
 
@@ -64,5 +92,8 @@ func DeleteTask(c *gin.Context) {
 	}
 
 	config.DB.Delete(&task)
+	cacheKey := fmt.Sprintf("tasks:user:%d", task.UserID)
+	config.RedisClient.Del(context.Background(), cacheKey)
+
 	c.JSON(http.StatusOK, gin.H{"message": "Task deleted!"})
 }
